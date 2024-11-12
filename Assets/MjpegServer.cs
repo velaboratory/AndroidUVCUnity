@@ -12,6 +12,8 @@ using UnityEngine.UI;
 
 public class MjpegServer : MonoBehaviour
 {
+	List<Thread> threads = new List<Thread>();
+	List<AutoResetEvent> events = new List<AutoResetEvent>();
 	//UI
 	public TMP_Dropdown resolutionDropdown; 
 	public TMP_Text cameraText;
@@ -23,6 +25,7 @@ public class MjpegServer : MonoBehaviour
 	//MJPEG Server
 	private HttpListener listener;
 	private Thread serverThread;
+	AutoResetEvent waitHandle = new AutoResetEvent(false);
 	public int port; //set when created
 
 	//Camera access
@@ -152,61 +155,60 @@ public class MjpegServer : MonoBehaviour
 		listener = new HttpListener();
 		listener.Prefixes.Add($"http://*:{port}/");
 		listener.Start();
-		List<Thread> threads = new List<Thread>();
+		
 		while (listener.IsListening)
 		{
 			var context = listener.GetContext();
-			Thread t = new Thread((_) => { HandleClient(context, 2); }); //todo, allow the min sleep to be set by client
+			AutoResetEvent e = new AutoResetEvent(false);
+			events.Add(e);
+			Thread t = new Thread((_) => { HandleClient(context, 2, e); }); //todo, allow the min sleep to be set by client
 			threads.Add(t);
+			
 			t.Start();
 		}
 	}
 	
 	//note, min sleep refers to, effectively, the max frame rate.  This function will only send new frames, but polls for them
-	private void HandleClient(HttpListenerContext context, int minSleepMS)
+	private void HandleClient(HttpListenerContext context, int minSleepMS, AutoResetEvent waitHandle)
 	{
 		context.Response.ContentType = "multipart/x-mixed-replace; boundary=--frame";
 		context.Response.StatusCode = (int)HttpStatusCode.OK;
-		int lastFrameSent = -1;
 		int numSent = 0;
-		
+		ServicePointManager.UseNagleAlgorithm = false;
 		using (Stream output = context.Response.OutputStream)
 		{
 			byte[] toSendJpeg = new byte[width*height*3];
 			while (started) {
-
-				if (lastFrameNumber != lastFrameSent) //we have a new frame
+				waitHandle.WaitOne(); //will only work for one client...
+				
+				int actualBytes = 0;
+				lock (jpegLock) //we'll copy the jpeg, which is faster than sending it
 				{
-					lastFrameSent = lastFrameNumber;
-					int actualBytes = 0;
-					lock (jpegLock) //we'll copy the jpeg, which is faster than sending it
+					if (cameraJpeg != null)
 					{
-						if (cameraJpeg != null)
-						{
-							Array.Copy(cameraJpeg,toSendJpeg, cameraJpegActualBytes);
-							actualBytes = cameraJpegActualBytes;
-						}
-					}
-					if(cameraJpeg == null)
-					{
-						continue;
-					}
-					if (toSendJpeg != null)
-					{
-						numSent++;
-
-						// Write MJPEG frame headers
-						string header = $"\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {actualBytes}\r\n\r\n";
-						byte[] headerData = Encoding.ASCII.GetBytes(header);
-						output.Write(headerData, 0, headerData.Length);
-						// Write JPEG frame
-						output.Write(toSendJpeg, 0, actualBytes);
-						output.Flush();
-					
+						Array.Copy(cameraJpeg,toSendJpeg, cameraJpegActualBytes);
+						actualBytes = cameraJpegActualBytes;
 					}
 				}
+				if(cameraJpeg == null)
+				{
+					continue;
+				}
+				if (toSendJpeg != null)
+				{
+					numSent++;
+
+					// Write MJPEG frame headers
+					string header = $"\r\n--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {actualBytes}\r\n\r\n";
+					byte[] headerData = Encoding.ASCII.GetBytes(header);
+					output.Write(headerData, 0, headerData.Length);
+					// Write JPEG frame
+					output.Write(toSendJpeg, 0, actualBytes);
+					output.Flush();
+					
+				}
 				
-				Thread.Sleep(minSleepMS); //we'll poll for new frames a lot.  
+				 
 			}
 		}
 		
@@ -249,7 +251,6 @@ public class MjpegServer : MonoBehaviour
 			if (currFrameNumber != lastFrameNumber)
 			{
 				lastFrameNumber = currFrameNumber;
-				Debug.Log(cameraName+": " +currFrameNumber);
 				sbyte[] jpegData = handler.plugin.Call<sbyte[]>("GetJpegData", cameraName);
 
 
@@ -273,6 +274,11 @@ public class MjpegServer : MonoBehaviour
 						cameraJpegActualBytes = actualBytes;
 						Buffer.BlockCopy(jpegData, 4, cameraJpeg, 0, actualBytes);
 					}
+					foreach (var e in events)
+					{
+						e.Set();
+					}
+
 				}
 
 				lock (frameLock)

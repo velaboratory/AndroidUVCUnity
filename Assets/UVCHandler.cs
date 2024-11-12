@@ -88,7 +88,7 @@ public class UVCHandler : MonoBehaviour
 				}
 			}
 
-			Thread.Sleep(1); //absolute max of 250hz
+			Thread.Sleep(1); //absolute max of 1000 hz
 		}
 		
 
